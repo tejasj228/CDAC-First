@@ -9,6 +9,7 @@
     "dev:api": "node --watch server/index.js",
     "start": "node server/index.js",
     "db": "node server/peek.js",
+    "db:reset": "node -e \"require('fs').rmSync('server/pgdata',{recursive:true,force:true});console.log('local database deleted')\"",
     "test": "node tests/auth.test.mjs",
     "build": "vite build",
     "lint": "oxlint",

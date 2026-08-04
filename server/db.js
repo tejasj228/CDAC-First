@@ -19,8 +19,26 @@ async function getBackend() {
   backendPromise = (async () => {
     if (config.useEmbeddedDb) {
       const { PGlite } = await import('@electric-sql/pglite')
+
       // No argument = in memory; a path = persisted to that folder.
-      const db = new PGlite(config.embeddedDbPath)
+      // Only ONE process may hold a persisted folder open at a time, so this
+      // throws if `npm run dev` is already running (or if a previous run was
+      // killed mid-write and left the folder in a bad state).
+      let db
+      try {
+        db = new PGlite(config.embeddedDbPath)
+        await db.waitReady
+      } catch (cause) {
+        throw new Error(
+          'Could not open the local database at server/pgdata.\n' +
+            '  - Is `npm run dev` already running? The embedded database allows ' +
+            'only one process at a time; stop it and try again.\n' +
+            '  - Otherwise the folder was left in a bad state: run `npm run db:reset` ' +
+            'to start fresh (this deletes local accounts).',
+          { cause },
+        )
+      }
+
       return {
         // PGlite calls it affectedRows; node-postgres calls it rowCount. Line
         // them up here so no caller has to care which one it is talking to.
@@ -29,6 +47,7 @@ async function getBackend() {
           return { rows: result.rows, rowCount: result.affectedRows ?? result.rows.length }
         },
         exec: (text) => db.exec(text),
+        close: () => db.close(),
       }
     }
 
@@ -43,6 +62,7 @@ async function getBackend() {
     return {
       query: (text, params) => pool.query(text, params),
       exec: (text) => pool.query(text),
+      close: () => pool.end(),
     }
   })()
 
@@ -102,6 +122,14 @@ export async function ensureSchema() {
 export async function query(text, params) {
   const backend = await ensureSchema()
   return backend.query(text, params)
+}
+
+// Closing cleanly matters for the embedded database: killing the process
+// mid-write is what leaves server/pgdata unreadable next time.
+export async function closeDb() {
+  if (!backendPromise) return
+  const backend = await backendPromise
+  await backend.close()
 }
 
 // Small helpers so the routes read cleanly.

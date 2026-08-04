@@ -1,6 +1,29 @@
 // `npm run db` -- prints what is actually stored, for when you want to show
 // someone that the database holds a hash and never the password itself.
-import { query } from './db.js'
+import { config } from './config.js'
+import { query, closeDb } from './db.js'
+
+// The embedded development database is a folder that only one process may write
+// to. Opening it from here while `npm run dev` holds it is what corrupts it, and
+// PGlite does not stop us -- so check for the running server ourselves first.
+// With a real DATABASE_URL (Neon) there is no such restriction.
+if (config.useEmbeddedDb) {
+  const devServerRunning = await fetch(`http://localhost:${config.port}/api/health`, {
+    signal: AbortSignal.timeout(1000),
+  })
+    .then((res) => res.ok)
+    .catch(() => false)
+
+  if (devServerRunning) {
+    console.error(
+      '\nThe dev server is running and is holding the local database open.\n' +
+        'Stop `npm run dev` first, then run `npm run db` again.\n\n' +
+        'The local database allows only one process at a time. (Set DATABASE_URL\n' +
+        'to a Neon database and this restriction goes away.)\n',
+    )
+    process.exit(1)
+  }
+}
 
 const { rows: users } = await query(
   `SELECT id, name, email, password_hash, created_at, last_login_at, login_count
@@ -34,4 +57,5 @@ for (const s of sessions) {
 }
 console.log()
 
+await closeDb().catch(() => {})
 process.exit(0)
