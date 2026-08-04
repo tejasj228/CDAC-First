@@ -15,9 +15,8 @@ dist-ssr
 # Secret keys (auto-generated on first server start)
 .env
 
-# SQLite database file
-server/data.db
-server/data.db-*
+# Local development database (embedded Postgres)
+server/pgdata
 
 # Editor directories and files
 .vscode/*

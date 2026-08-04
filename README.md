@@ -15,8 +15,8 @@ pre-fills your email, restores your theme and tells you when you were last here.
 | Piece | Choice | Why |
 | --- | --- | --- |
 | Frontend | React 19 + Vite | – |
-| Backend | Express 5 | Same language as the frontend |
-| Database | SQLite (one file, `server/data.db`) | No database server to install |
+| Backend | Express 5, as a Vercel serverless function | Same language as the frontend |
+| Database | Postgres (Neon in production, embedded locally) | Free, managed, no server to run |
 | Passwords | bcrypt, cost 12 | The standard for password storage |
 | Session | JWT inside an `httpOnly` cookie | Scripts can't read it, users can't forge it |
 | Preferences | AES-256-GCM encrypted cookie | Unreadable in the browser, tamper-evident |
@@ -33,15 +33,23 @@ npm run dev
 - App: http://localhost:5173
 - API: http://localhost:4000
 
-`npm run dev` starts both. On the very first run the server generates a `.env`
-file with random secret keys — that file is git-ignored and must never be
-committed.
+That's the whole setup — no database to install and no accounts to create. With
+no `DATABASE_URL` set, the server runs [PGlite](https://pglite.dev): real
+Postgres compiled to WebAssembly, running inside Node and saving to
+`server/pgdata/`. The SQL is identical to what runs in production.
+
+On the very first run the server also generates a `.env` file with random secret
+keys. That file is git-ignored and must never be committed.
+
+To develop against the real Neon database instead, put its connection string in
+`.env` as `DATABASE_URL=postgresql://…`.
 
 Other scripts:
 
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Frontend + backend together |
+| `npm test` | Runs the full sign-in flow against an in-memory Postgres |
 | `npm run db` | Prints the users table so you can see the stored hashes |
 | `npm run build` | Builds the frontend into `dist/` |
 | `npm start` | Production mode: one server serves both API and frontend |
@@ -126,66 +134,56 @@ your decrypted preferences. Nothing was typed in.
 `maxAge` at all, which makes it a *session cookie* — the browser deletes it when
 it closes.
 
-Also included: rate limiting (5 failed attempts locks that email for 60 seconds),
-a login path that takes the same time whether or not the email exists (so timing
-doesn't leak which emails are registered), and a password strength meter.
+Also included: rate limiting (5 failed attempts locks that email for 60 seconds,
+counted in the database so it survives restarts and works across every server
+instance), a login path that takes the same time whether or not the email exists
+(so timing doesn't leak which emails are registered), and a password strength
+meter.
 
 ---
 
-## Deploying
+## Deploying — everything on Vercel
 
-SQLite is a file on the server's disk, so the backend needs a host that runs a
-real Node process. Vercel's serverless functions don't keep a disk between
-requests, so the API goes on **Render** either way.
+The frontend is served from Vercel's CDN and the Express app runs as a single
+serverless function (`api/index.js`), so the site and the API share one origin
+and the cookies stay first-party. The database is Neon, Vercel's managed
+Postgres. All three are free.
 
-### Option A — everything on Render (simplest)
+**1. Import the project.** On [vercel.com](https://vercel.com): **Add New →
+Project**, import this repo, **Deploy**. Vite is detected automatically. The
+first deploy will build fine but the API won't work yet — it has no database.
 
-One service serves the API *and* the built React app, so both share an origin and
-the cookies just work.
+**2. Create the database.** In the project, go to the **Storage** tab → **Create
+Database** → **Neon (Postgres)** → **Connect**. Vercel adds `DATABASE_URL` to the
+project's environment variables for you. The tables are created automatically on
+the first request.
 
-1. Push this repo to GitHub.
-2. On [render.com](https://render.com): **New → Blueprint**, pick the
-   `CDAC-First` repo. The included `render.yaml` fills in everything:
-   - Build command: `npm install && npm run build`
-   - Start command: `npm start`
-   - Env vars `JWT_SECRET` and `PREFS_KEY` are generated for you
-3. Click **Apply**. You get a URL like `https://securedesk.onrender.com`.
-
-If you'd rather not use the blueprint, create a **Web Service** manually with the
-same two commands, then add three environment variables: `NODE_ENV=production`,
-plus long random values for `JWT_SECRET` and `PREFS_KEY`. Generate them with:
+**3. Add the two secret keys.** **Settings → Environment Variables**, add
+`JWT_SECRET` and `PREFS_KEY`. Generate a different random value for each:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-### Option B — frontend on Vercel, backend on Render
+**4. Redeploy** so the function picks up the new variables: **Deployments → ⋯ on
+the latest one → Redeploy**.
 
-Do Option A first so the backend exists. Then:
+Open the URL and register an account. In DevTools → Application → Cookies you
+should see `sid` and `prefs` on your `*.vercel.app` domain.
 
-1. Edit `vercel.json` and replace `securedesk.onrender.com` with your real Render
-   host.
-2. On [vercel.com](https://vercel.com): **Add New → Project**, import the repo,
-   deploy. Vite is detected automatically.
+### Worth knowing
 
-The `rewrites` rule in `vercel.json` makes Vercel forward `/api/*` to Render
-behind the scenes. The browser only ever talks to the Vercel domain, so the login
-cookie stays first-party — no CORS setup and no `SameSite=None`, which modern
-browsers increasingly block.
-
-### Two things to know about the free tiers
-
-- **Render's free instances sleep** after 15 minutes idle. The first request
-  afterwards takes ~50 seconds while it wakes up. Load the page once before
-  demoing it.
-- **The SQLite file is not permanent on the free plan.** A redeploy or restart
-  wipes registered users. Fine for a demo; for real persistence attach a Render
-  disk (paid) or move to Postgres.
+- **Don't change the keys later.** Rotating `JWT_SECRET` signs everyone out, and
+  rotating `PREFS_KEY` makes existing preference cookies unreadable (the app
+  falls back to defaults, so nothing breaks — people just lose their settings).
+- **Neon's free database sleeps** after a few minutes idle and takes a second or
+  two to wake. The first request after a quiet spell is slower.
+- **`NODE_ENV=production` is set by Vercel automatically**, which is what turns
+  on `Secure` cookies and `trust proxy`.
 
 ---
 
 ## What I'd add next
 
-Refresh-token rotation, email verification, password reset, a CSRF token for
-defence in depth, and moving the rate limiter into Redis so it survives restarts
-and works across several servers.
+Refresh-token rotation, email verification, password reset, and a CSRF token for
+defence in depth.

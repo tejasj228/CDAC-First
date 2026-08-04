@@ -4,15 +4,13 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 
 import { config } from './config.js'
-import { queries } from './db.js'
+import { db } from './db.js'
 import { encrypt, decrypt } from './secure-cookie.js'
 
 export const router = express.Router()
 
 export const SESSION_COOKIE = 'sid'
 export const PREFS_COOKIE = 'prefs'
-
-const now = () => new Date().toISOString()
 
 /* ------------------------------------------------------------------ *
  * Cookies
@@ -90,49 +88,21 @@ function validateCredentials({ email, password, name }, { needName }) {
   return null
 }
 
-// Very small in-memory brute-force guard. A real deployment would keep this in
-// Redis so it survives a restart and works across multiple servers.
-const failedAttempts = new Map()
-
-function lockoutRemaining(key) {
-  const entry = failedAttempts.get(key)
-  if (!entry || entry.count < config.maxFailedLogins) return 0
-  const remaining = entry.lockedUntil - Date.now()
-  if (remaining <= 0) {
-    failedAttempts.delete(key)
-    return 0
-  }
-  return Math.ceil(remaining / 1000)
-}
-
-function noteFailure(key) {
-  const entry = failedAttempts.get(key) || { count: 0, lockedUntil: 0 }
-  entry.count += 1
-  if (entry.count >= config.maxFailedLogins) {
-    entry.lockedUntil = Date.now() + config.lockoutSeconds * 1000
-  }
-  failedAttempts.set(key, entry)
-  return Math.max(0, config.maxFailedLogins - entry.count)
-}
-
-function startSession(req, res, user, remember) {
+async function startSession(req, res, user, remember) {
   const maxAgeMs = remember
     ? config.rememberMeDays * 24 * 60 * 60 * 1000
     : config.sessionMinutes * 60 * 1000
 
   const sessionId = crypto.randomUUID()
-  const createdAt = now()
 
-  queries.createSession.run({
+  await db.createSession({
     id: sessionId,
     user_id: user.id,
-    created_at: createdAt,
-    expires_at: new Date(Date.now() + maxAgeMs).toISOString(),
-    last_seen: createdAt,
+    expires_at: new Date(Date.now() + maxAgeMs),
     user_agent: req.get('user-agent') ?? null,
     ip: req.ip ?? null,
   })
-  queries.recordLogin.run(createdAt, user.id)
+  const updatedUser = await db.recordLogin(user.id)
 
   // The cookie holds a signed JWT, not the user id on its own. Anyone can read
   // the payload, but without the secret key nobody can forge the signature --
@@ -144,12 +114,12 @@ function startSession(req, res, user, remember) {
   // "remember me" off -> no maxAge -> cookie is dropped when the browser closes.
   res.cookie(SESSION_COOKIE, token, sessionCookieOptions(remember ? maxAgeMs : null))
 
-  return sessionId
+  return updatedUser
 }
 
 // Reads the cookie and turns it back into a user. Returns null when there is no
 // valid login. Every protected route goes through this.
-function currentAuth(req) {
+async function currentAuth(req) {
   const token = req.cookies?.[SESSION_COOKIE]
   if (!token) return null
 
@@ -160,19 +130,18 @@ function currentAuth(req) {
     return null
   }
 
-  const session = queries.findSession.get(payload.sid)
-  if (!session || session.revoked_at) return null
-  if (session.expires_at <= now()) return null
+  const session = await db.findLiveSession(payload.sid)
+  if (!session) return null
 
-  const user = queries.findUserById.get(session.user_id)
+  const user = await db.findUserById(session.user_id)
   if (!user) return null
 
-  queries.touchSession.run(now(), session.id)
+  await db.touchSession(session.id)
   return { user, session }
 }
 
-function requireAuth(req, res, next) {
-  const auth = currentAuth(req)
+async function requireAuth(req, res, next) {
+  const auth = await currentAuth(req)
   if (!auth) {
     res.clearCookie(SESSION_COOKIE, sessionCookieOptions())
     return res.status(401).json({ error: 'Not signed in.' })
@@ -188,15 +157,14 @@ function requireAuth(req, res, next) {
 // Called on every page load. Works signed in OR signed out: when signed out it
 // still returns the remembered preferences so the page can pre-fill the email
 // and restore the theme.
-router.get('/session', (req, res) => {
-  const auth = currentAuth(req)
-  const prefs = readPrefs(req)
+router.get('/session', async (req, res) => {
+  const auth = await currentAuth(req)
 
   res.json({
     user: auth ? publicUser(auth.user) : null,
-    prefs,
+    prefs: readPrefs(req),
     sessions: auth
-      ? queries.activeSessions.all(auth.user.id, now()).map((s) => ({
+      ? (await db.activeSessions(auth.user.id)).map((s) => ({
           ...s,
           current: s.id === auth.session.id,
         }))
@@ -210,7 +178,7 @@ router.post('/register', async (req, res) => {
   const problem = validateCredentials({ name, email, password }, { needName: true })
   if (problem) return res.status(400).json({ error: problem })
 
-  if (queries.findUserByEmail.get(email)) {
+  if (await db.findUserByEmail(email)) {
     return res.status(409).json({ error: 'That email is already registered.' })
   }
 
@@ -218,28 +186,24 @@ router.post('/register', async (req, res) => {
   // the hash string, and the cost makes brute-forcing the hash slow on purpose.
   const password_hash = await bcrypt.hash(password, 12)
 
-  const info = queries.createUser.run({
+  const user = await db.createUser({
     name: name.trim(),
     email: email.trim(),
     password_hash,
-    created_at: now(),
   })
 
-  const user = queries.findUserById.get(info.lastInsertRowid)
-  startSession(req, res, user, false)
+  const updated = await startSession(req, res, user, false)
 
   writePrefs(res, {
     ...readPrefs(req),
     lastEmail: user.email,
     lastName: user.name,
-    lastVisitAt: now(),
+    lastVisitAt: new Date().toISOString(),
     previousVisitAt: null,
     visits: 1,
   })
 
-  res.status(201).json({
-    user: { ...publicUser(user), loginCount: 1, previousLoginAt: null },
-  })
+  res.status(201).json({ user: { ...publicUser(updated), previousLoginAt: null } })
 })
 
 router.post('/login', async (req, res) => {
@@ -248,36 +212,36 @@ router.post('/login', async (req, res) => {
   const problem = validateCredentials({ email, password }, { needName: false })
   if (problem) return res.status(400).json({ error: problem })
 
-  const key = String(email).toLowerCase()
-  const locked = lockoutRemaining(key)
+  const locked = await db.lockoutFor(email)
   if (locked) {
     return res
       .status(429)
-      .json({ error: `Too many failed attempts. Try again in ${locked}s.` })
+      .json({ error: `Too many failed attempts. Try again in ${locked.seconds_left}s.` })
   }
 
-  const user = queries.findUserByEmail.get(email)
+  const user = await db.findUserByEmail(email)
 
   // Compare against a dummy hash when the user does not exist so that both
   // cases take the same amount of time -- otherwise the response time alone
   // would tell an attacker which emails are registered.
-  const hash = user?.password_hash ?? '$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv'
+  const hash =
+    user?.password_hash ?? '$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv'
   const ok = await bcrypt.compare(password, hash)
 
   if (!user || !ok) {
-    const left = noteFailure(key)
+    const attempt = await db.noteFailedLogin(email, config.maxFailedLogins, config.lockoutSeconds)
     return res.status(401).json({
       error: 'Incorrect email or password.',
-      attemptsLeft: left,
+      attemptsLeft: Math.max(0, config.maxFailedLogins - attempt.fails),
     })
   }
 
-  failedAttempts.delete(key)
+  await db.clearFailedLogins(email)
 
-  // Grab the "before" values first -- once startSession runs, last_login_at is
+  // Grab the "before" value first -- once startSession runs, last_login_at is
   // this login, and we want to show the user their PREVIOUS one.
   const previousLoginAt = user.last_login_at
-  startSession(req, res, user, Boolean(remember))
+  const updated = await startSession(req, res, user, Boolean(remember))
 
   const prefs = readPrefs(req)
   writePrefs(res, {
@@ -285,23 +249,17 @@ router.post('/login', async (req, res) => {
     lastEmail: user.email,
     lastName: user.name,
     previousVisitAt: prefs.lastVisitAt,
-    lastVisitAt: now(),
+    lastVisitAt: new Date().toISOString(),
     visits: (prefs.visits || 0) + 1,
   })
 
-  res.json({
-    user: {
-      ...publicUser(user),
-      loginCount: user.login_count + 1,
-      previousLoginAt,
-    },
-  })
+  res.json({ user: { ...publicUser(updated), previousLoginAt } })
 })
 
-router.post('/logout', (req, res) => {
-  const auth = currentAuth(req)
+router.post('/logout', async (req, res) => {
+  const auth = await currentAuth(req)
   // Revoke server-side too, so a copied cookie is useless after logout.
-  if (auth) queries.revokeSession.run(now(), auth.session.id)
+  if (auth) await db.revokeSession(auth.session.id)
 
   res.clearCookie(SESSION_COOKIE, sessionCookieOptions())
   // The preferences cookie deliberately survives logout -- that is what lets us
@@ -320,14 +278,14 @@ router.patch('/prefs', (req, res) => {
   res.json({ prefs })
 })
 
-router.post('/sessions/revoke-others', requireAuth, (req, res) => {
-  const info = queries.revokeOtherSessions.run(now(), req.auth.user.id, req.auth.session.id)
-  res.json({ revoked: info.changes })
+router.post('/sessions/revoke-others', requireAuth, async (req, res) => {
+  const revoked = await db.revokeOtherSessions(req.auth.user.id, req.auth.session.id)
+  res.json({ revoked })
 })
 
 // Demo endpoint: shows exactly what the browser sent us and what it decodes to.
 // Handy for explaining the design; you would not ship this in production.
-router.get('/cookie-inspector', (req, res) => {
+router.get('/cookie-inspector', async (req, res) => {
   const raw = req.cookies ?? {}
   const token = raw[SESSION_COOKIE]
 
@@ -349,7 +307,7 @@ router.get('/cookie-inspector', (req, res) => {
       present: Boolean(token),
       raw: token ?? null,
       decodedPayload: jwtPayload,
-      valid: Boolean(currentAuth(req)),
+      valid: Boolean(await currentAuth(req)),
     },
     prefs: {
       raw: raw[PREFS_COOKIE] ?? null,
