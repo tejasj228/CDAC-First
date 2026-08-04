@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "//": "Vercel forwards /api/* to the Render backend. The browser only ever talks to the Vercel domain, so the login cookie stays first-party and no CORS or SameSite=None is needed. Replace the host below with your own Render URL.",
+      "source": "/api/:path*",
+      "destination": "https://securedesk.onrender.com/api/:path*"
+    }
+  ]
+}

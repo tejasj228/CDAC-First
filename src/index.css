@@ -1,0 +1,106 @@
+/* ------------------------------------------------------------------ *
+ * Design tokens
+ *
+ * The [data-theme] attribute on <html> is written by App.jsx from the
+ * encrypted preferences cookie -- that is why the theme survives a sign-out.
+ * ------------------------------------------------------------------ */
+
+:root,
+:root[data-theme='dark'] {
+  --ink: #080d0e; /* page */
+  --stage: #0b1214; /* left panel */
+  --surface: #0f1719; /* cards */
+  --surface-2: #141f21; /* inset blocks */
+  --line: #1d2b2d; /* hairlines */
+  --text: #e6efec;
+  --muted: #7d918e;
+  --brass: #e0a94b; /* the accent: vault metal */
+  --brass-dim: rgba(224, 169, 75, 0.14);
+  --mint: #63d7b4; /* "decrypted / verified" */
+  --danger: #f2765f;
+  --on-brass: #0a0f10;
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --ink: #eef1ef;
+  --stage: #e5eae7;
+  --surface: #ffffff;
+  --surface-2: #f4f7f5;
+  --line: #d9e1de;
+  --text: #0c1413;
+  --muted: #586a67;
+  --brass: #9a6a1f;
+  --brass-dim: rgba(154, 106, 31, 0.1);
+  --mint: #0f7a5c;
+  --danger: #c14a35;
+  --on-brass: #fffaf1;
+  color-scheme: light;
+}
+
+:root {
+  --display: 'Bricolage Grotesque', 'Segoe UI', system-ui, sans-serif;
+  --sans: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.4s ease, color 0.4s ease;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+p {
+  margin: 0;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* Keyboard users must always be able to see where they are. */
+:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+::selection {
+  background: var(--brass);
+  color: var(--on-brass);
+}
